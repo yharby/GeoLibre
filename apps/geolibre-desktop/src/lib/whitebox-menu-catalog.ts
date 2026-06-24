@@ -31,7 +31,7 @@ export interface WhiteboxMenuCategory {
   subcategories: WhiteboxMenuSubcategory[];
 }
 
-/** 746 tools across 9 categories. */
+/** 750 tools across 9 categories. */
 export const WHITEBOX_MENU_CATALOG: WhiteboxMenuCategory[] = [
   {
     key: "conversion",
@@ -40,10 +40,14 @@ export const WHITEBOX_MENU_CATALOG: WhiteboxMenuCategory[] = [
       {
         label: "GeoLibre",
         tools: [
+          { id: "h3_to_vector", name: "H3 Cells to Polygons" },
+          { id: "h3_polyfill", name: "H3 Polyfill" },
+          { id: "raster_to_h3", name: "Raster to H3 Bins" },
           { id: "write_pmtiles", name: "Raster to PMTiles" },
           { id: "raster_to_tiles", name: "Raster to XYZ Tiles" },
           { id: "read_geoparquet", name: "Read GeoParquet" },
           { id: "vector_convert", name: "Vector Convert" },
+          { id: "vector_to_h3", name: "Vector to H3 Bins" },
           { id: "write_geoparquet", name: "Write GeoParquet" },
         ],
       },
