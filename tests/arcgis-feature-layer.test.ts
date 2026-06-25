@@ -163,7 +163,7 @@ describe("addArcGISLayer (feature layer)", () => {
         sourceType: "url",
         url: "https://example.com/arcgis/rest/services/Cities/FeatureServer/0",
       }),
-      /HTML instead of GeoJSON/,
+      /instead of GeoJSON/,
     );
     assert.equal(useAppStore.getState().layers.length, 0);
   });

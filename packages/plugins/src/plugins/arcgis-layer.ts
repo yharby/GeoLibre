@@ -3,6 +3,7 @@
 import {
   DEFAULT_LAYER_STYLE,
   type GeoLibreLayer,
+  hasSimpleStyleProperties,
   useAppStore,
 } from "@geolibre/core";
 import type {
@@ -262,26 +263,34 @@ async function addArcGISFeatureLayerAsGeoJson(
     options.name?.trim() ||
     layerInfo.name ||
     layerNameFromArcGISInput(layerUrl, "ArcGIS Layer");
-  const store = useAppStore.getState();
-  // Persist the GeoJSON query endpoint (not the service-description base URL) as
-  // the source path so the layer's GeoJSON refresh re-fetches valid features.
-  const id = store.addGeoJsonLayer(
-    name,
-    geojson,
-    refreshUrl,
-    options.beforeLayerId ?? null,
-  );
-
-  // Preserve the service's copyright watermark in MapLibre's attribution
-  // control, matching the prior URL-source behavior.
+  // Build the layer in one store write (rather than addGeoJsonLayer + a follow-up
+  // updateLayer) so the source is created with its attribution from the first
+  // sync — updateLayer replaces the source object, but syncGeoJsonLayer only
+  // creates the MapLibre source once, so a later attribution patch could be
+  // missed. The body otherwise mirrors store.addGeoJsonLayer.
   const attribution = layerInfo.copyrightText?.trim();
-  if (attribution) {
-    store.updateLayer(id, { source: { type: "geojson", attribution } });
-  }
+  const layer: GeoLibreLayer = {
+    id: crypto.randomUUID(),
+    name,
+    type: "geojson",
+    source: { type: "geojson", ...(attribution ? { attribution } : {}) },
+    visible: true,
+    opacity: 1,
+    style: {
+      ...DEFAULT_LAYER_STYLE,
+      simpleStyleEnabled: hasSimpleStyleProperties(geojson),
+    },
+    metadata: {},
+    geojson,
+    // Persist the GeoJSON query endpoint (not the service-description base URL)
+    // as the source path so the layer's GeoJSON refresh re-fetches valid data.
+    sourcePath: refreshUrl,
+  };
+  useAppStore.getState().addLayer(layer, options.beforeLayerId ?? null);
 
   const bounds = arcgisExtentToBounds(layerInfo.extent);
   if (bounds) app.fitBounds?.(bounds);
-  return id;
+  return layer.id;
 }
 
 /**
@@ -302,13 +311,15 @@ async function fetchArcGISGeoJson(url: string): Promise<FeatureCollection> {
     throw new Error(`ArcGIS feature query failed with ${response.status}.`);
   }
   // ArcGIS Enterprise (and services behind a WAF) can answer 200 with an HTML
-  // login/redirect page when a token is missing or expired. Read the body as
-  // text first so that surfaces as a clear message instead of a raw
-  // `SyntaxError: Unexpected token '<'` from JSON.parse.
+  // login/redirect page, or an XML error envelope, when a token is missing or
+  // expired. Read the body as text first so that surfaces as a clear message
+  // instead of a raw `SyntaxError: Unexpected token '<'` from JSON.parse. The
+  // `<[!?a-zA-Z]` lead matches `<!DOCTYPE`, `<?xml`, and `<html`/`<error` while
+  // staying clear of a GeoJSON payload.
   const text = await response.text();
-  if (/^\s*</.test(text)) {
+  if (/^\s*<[!?a-zA-Z]/.test(text)) {
     throw new Error(
-      "The ArcGIS service returned HTML instead of GeoJSON (the layer may require a token or sign-in).",
+      "The ArcGIS service returned an HTML or XML document instead of GeoJSON (the layer may require a token or sign-in).",
     );
   }
   let json: FeatureCollection & {
