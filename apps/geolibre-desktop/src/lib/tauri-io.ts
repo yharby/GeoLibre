@@ -305,6 +305,11 @@ async function parseGeoJsonText(text: string): Promise<FeatureCollection> {
  * error surfaces instead of the plugin's. The command validates the path on the
  * Rust side, so routing the read through it cannot widen what is readable.
  *
+ * Browser safety: the `!isTauri()` re-throw lives in the catch, so in a browser
+ * build `readFile` is attempted (and fails) before falling through. That is only
+ * harmless because every caller is already Tauri-guarded upstream; a new browser
+ * caller must guard with {@link isTauri} itself.
+ *
  * @param path - Absolute local path to read.
  * @returns The file's raw bytes.
  */
@@ -827,7 +832,9 @@ async function loadTauriVectorFile(
       };
     } catch (error) {
       if (isVectorLoadCancelled(error)) throw error;
-      const detail = error instanceof Error ? error.message : "Unknown error";
+      // `read_local_file` rejects with a plain string, not an `Error`; keep its
+      // detail rather than collapsing to "Unknown error" on the restore path.
+      const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`Could not read this KMZ file. ${detail}`);
     }
   }
@@ -850,7 +857,7 @@ async function loadTauriVectorFile(
         path,
       };
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "Unknown error";
+      const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`Could not read this GPX file. ${detail}`);
     }
   }
@@ -881,7 +888,7 @@ async function loadTauriVectorFile(
     };
   } catch (error) {
     if (isVectorLoadCancelled(error)) throw error;
-    const detail = error instanceof Error ? error.message : "Unknown error";
+    const detail = error instanceof Error ? error.message : String(error);
     throw new Error(
       `Could not convert this vector file with DuckDB-WASM. ${detail}`,
     );
