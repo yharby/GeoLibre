@@ -49,7 +49,7 @@ function jsonResponse(body: unknown, raw?: string): Response {
 function makeArcGISFetch(): typeof fetch {
   return (async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    return jsonResponse(url.includes("/query") ? QUERY_GEOJSON : LAYER_INFO);
+    return jsonResponse(url.includes("f=geojson") ? QUERY_GEOJSON : LAYER_INFO);
   }) as typeof fetch;
 }
 
@@ -111,7 +111,7 @@ describe("addArcGISLayer (feature layer)", () => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       fetchUrls.push(url);
-      return jsonResponse(url.includes("/query") ? QUERY_GEOJSON : LAYER_INFO);
+      return jsonResponse(url.includes("f=geojson") ? QUERY_GEOJSON : LAYER_INFO);
     }) as typeof fetch;
 
     const id = await addArcGISLayer(app, {
@@ -133,7 +133,7 @@ describe("addArcGISLayer (feature layer)", () => {
   it("rejects a non-GeoJSON query response instead of adding an empty layer", async () => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      return url.includes("/query")
+      return url.includes("f=geojson")
         ? jsonResponse({ error: { message: "Token Required" } })
         : jsonResponse(LAYER_INFO);
     }) as typeof fetch;
@@ -152,7 +152,7 @@ describe("addArcGISLayer (feature layer)", () => {
   it("rejects an HTML login page returned with a 200 status", async () => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      return url.includes("/query")
+      return url.includes("f=geojson")
         ? jsonResponse(null, "<!DOCTYPE html><html><body>Sign in</body></html>")
         : jsonResponse(LAYER_INFO);
     }) as typeof fetch;
@@ -171,7 +171,7 @@ describe("addArcGISLayer (feature layer)", () => {
   it("warns but still loads when the query exceeds the service record limit", async () => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      return url.includes("/query")
+      return url.includes("f=geojson")
         ? jsonResponse({ ...QUERY_GEOJSON, exceededTransferLimit: true })
         : jsonResponse(LAYER_INFO);
     }) as typeof fetch;
@@ -207,7 +207,7 @@ describe("addArcGISLayer (feature layer)", () => {
       if (url.includes("/content/items/")) {
         return jsonResponse({ url: serviceUrl });
       }
-      return jsonResponse(url.includes("/query") ? QUERY_GEOJSON : LAYER_INFO);
+      return jsonResponse(url.includes("f=geojson") ? QUERY_GEOJSON : LAYER_INFO);
     }) as typeof fetch;
 
     const id = await addArcGISLayer(app, {
