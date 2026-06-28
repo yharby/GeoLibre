@@ -1,3 +1,4 @@
+mod duckdb_vector;
 mod earth_engine_oauth;
 
 use earth_engine_oauth::{
