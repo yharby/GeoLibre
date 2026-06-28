@@ -32,7 +32,12 @@ export async function loadNativeVectorFile(
     layer: options.layer,
     overrideSourceCrs: options.overrideSourceCrs,
     featureWarnCount: DUCKDB_VECTOR_FEATURE_WARN_COUNT,
-    largeDatasetConfirmed: false,
+    // Pre-confirm when there is no callback to prompt with.  That way the Rust
+    // side skips the feature count entirely and reads the file in a single
+    // pass, mirroring the WASM loader's "only gate when a callback is
+    // attached" behaviour.  When a callback IS provided, leave unconfirmed so
+    // Rust counts and may return needsConfirmation for the prompt flow below.
+    largeDatasetConfirmed: !options.onLargeDataset,
   };
 
   const first = await invoke<NativeVectorResult>("load_native_vector", {

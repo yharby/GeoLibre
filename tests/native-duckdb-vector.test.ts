@@ -42,6 +42,34 @@ test("returns the parsed FeatureCollection on a direct load", async () => {
   assert.equal(calls[0].cmd, "load_native_vector");
 });
 
+test("no-callback large file: single invoke pre-confirmed, no gate", async () => {
+  calls.length = 0;
+  // The mock would gate if the first call were unconfirmed — but with no
+  // onLargeDataset callback the wrapper must pre-confirm, so the mock should
+  // never see largeDatasetConfirmed: false on a large file.
+  responder = (_cmd, args: any) => {
+    // If the wrapper incorrectly sent largeDatasetConfirmed: false the mock
+    // returns needsConfirmation: true, which would cause a second invoke.
+    if (!args.options.largeDatasetConfirmed) {
+      return { needsConfirmation: true, featureCount: 600_000 };
+    }
+    return {
+      needsConfirmation: false,
+      featureCollection: JSON.stringify({ type: "FeatureCollection", features: [] }),
+    };
+  };
+  // No onLargeDataset callback -> wrapper must pre-confirm.
+  const fc = await loadNativeVectorFile("/abs/huge.parquet", "parquet");
+  assert.equal(fc.type, "FeatureCollection");
+  // Must be exactly ONE invoke (pre-confirmed, no second round-trip).
+  assert.equal(calls.length, 1, "expected exactly 1 invoke when no callback is provided");
+  assert.equal(
+    (calls[0].args as any).options.largeDatasetConfirmed,
+    true,
+    "first invoke must have largeDatasetConfirmed: true when no callback",
+  );
+});
+
 test("prompts and re-invokes confirmed when needsConfirmation", async () => {
   calls.length = 0;
   let firstCall = true;

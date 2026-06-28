@@ -236,7 +236,7 @@ pub(crate) fn run_native_load(
     let confirmed = options.large_dataset_confirmed.unwrap_or(false);
     if !confirmed {
         let count = count_features(conn, &src)?;
-        if count > warn_at {
+        if count >= warn_at {
             return Ok(NativeVectorResult {
                 needs_confirmation: true,
                 feature_count: Some(count),
