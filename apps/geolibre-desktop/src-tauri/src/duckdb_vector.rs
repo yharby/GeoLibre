@@ -105,16 +105,14 @@ fn null_patch_json(keys: &[String]) -> String {
     format!("{{{}}}", entries.join(","))
 }
 
-fn feature_collection_sql(source_sql: &str, geom_geojson_expr: &str, null_patch: &str) -> String {
+fn per_feature_sql(source_sql: &str, geom_geojson_expr: &str, null_patch: &str) -> String {
     format!(
         "SELECT json_object(\
-           'type', 'FeatureCollection', \
-           'features', coalesce(json_group_array(json_object(\
-             'type', 'Feature', \
-             'geometry', {geom}::JSON, \
-             'properties', json_merge_patch(to_json(s), {patch})\
-           )), json_array())\
-         ) AS fc FROM ({source}) AS s",
+           'type', 'Feature', \
+           'geometry', {geom}::JSON, \
+           'properties', json_merge_patch(to_json(s), {patch})\
+         )::VARCHAR AS feature \
+         FROM ({source}) AS s",
         geom = geom_geojson_expr,
         patch = quote_sql_string(null_patch),
         source = source_sql,
@@ -193,10 +191,25 @@ fn load_feature_collection(
 
     let geom_geojson = geometry_geojson_expr(&geometry_expr(&detected), source_crs.as_deref());
     let patch = null_patch_json(&excluded_property_keys(&columns, &detected.column));
-    let sql = feature_collection_sql(&src, &geom_geojson, &patch);
+    let sql = per_feature_sql(&src, &geom_geojson, &patch);
 
-    conn.query_row(&sql, [], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("Could not build GeoJSON: {e}"))
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("Could not build GeoJSON: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Could not build GeoJSON: {e}"))?;
+
+    let mut out = String::from(r#"{"type":"FeatureCollection","features":["#);
+    let mut first = true;
+    for row in rows {
+        let feature = row.map_err(|e| format!("Could not build GeoJSON: {e}"))?;
+        if !first {
+            out.push(',');
+        }
+        out.push_str(&feature);
+        first = false;
+    }
+    out.push_str("]}");
+    Ok(out)
 }
 
 pub(crate) const DEFAULT_FEATURE_WARN_COUNT: u64 = 500_000;
@@ -501,5 +514,44 @@ mod tests {
                 .unwrap_or(0);
             assert_eq!(ok, 1);
         }
+    }
+
+    #[test]
+    fn memory_regression_streaming_does_not_oom() {
+        // Write a large temp parquet at runtime — no binary fixture committed.
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join("duckdb_oom_regression_200k.parquet");
+        let path_str = tmp_path.to_string_lossy().to_string();
+
+        // Generate 200_000 random points into a parquet file.
+        {
+            let gen_conn = open_in_memory().expect("gen conn");
+            gen_conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial for gen");
+            gen_conn.execute_batch(&format!(
+                "COPY (SELECT i AS id, ST_Point(random()*360-180, random()*180-90) AS geom \
+                 FROM range(200000) t(i)) TO '{}' (FORMAT PARQUET);",
+                path_str.replace('\'', "''")
+            )).expect("generate parquet");
+        }
+
+        // Load with a constrained memory_limit to prove streaming doesn't OOM.
+        let conn = open_in_memory().expect("conn");
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial");
+        conn.execute_batch("SET memory_limit='128MB';").expect("set memory_limit");
+
+        let result = load_feature_collection(
+            &conn,
+            &path_str,
+            "parquet",
+            &NativeVectorOptions::default(),
+        );
+
+        // Clean up temp file.
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let fc_json = result.expect("load_feature_collection must not OOM with streaming");
+        let fc: serde_json::Value = serde_json::from_str(&fc_json).expect("valid json");
+        assert_eq!(fc["type"], "FeatureCollection");
+        assert_eq!(fc["features"].as_array().unwrap().len(), 200_000);
     }
 }
