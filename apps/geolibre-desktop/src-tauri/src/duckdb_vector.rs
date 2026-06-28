@@ -119,6 +119,84 @@ fn feature_collection_sql(source_sql: &str, geom_geojson_expr: &str, null_patch:
     )
 }
 
+use serde::Deserialize;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct NativeVectorOptions {
+    pub layer: Option<String>,
+    pub override_source_crs: Option<String>,
+    pub feature_warn_count: Option<u64>,
+    pub large_dataset_confirmed: Option<bool>,
+}
+
+fn describe_columns(conn: &Connection, source_sql: &str) -> Result<Vec<DescribedColumn>, String> {
+    let mut stmt = conn
+        .prepare(&format!("DESCRIBE {source_sql}"))
+        .map_err(|e| format!("DESCRIBE failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DescribedColumn {
+                name: row.get::<_, String>(0)?,
+                column_type: row.get::<_, String>(1)?,
+            })
+        })
+        .map_err(|e| format!("DESCRIBE read failed: {e}"))?;
+    let mut cols = Vec::new();
+    for row in rows {
+        cols.push(row.map_err(|e| format!("DESCRIBE row failed: {e}"))?);
+    }
+    Ok(cols)
+}
+
+fn read_source_crs(conn: &Connection, path: &str, extension: &str) -> Option<String> {
+    if is_parquet_extension(extension) {
+        return None;
+    }
+    let sql = format!(
+        "SELECT layers[1].geometry_fields[1].crs.auth_name, \
+                layers[1].geometry_fields[1].crs.auth_code \
+         FROM ST_Read_Meta({})",
+        quote_sql_string(path)
+    );
+    let result: Result<(Option<String>, Option<String>), _> =
+        conn.query_row(&sql, [], |row| Ok((row.get(0).ok(), row.get(1).ok())));
+    let (auth_name, auth_code) = result.ok()?;
+    let auth_name = auth_name?.trim().to_string();
+    let auth_code = auth_code?.trim().to_string();
+    if auth_name.is_empty() || auth_code.is_empty() {
+        return None;
+    }
+    Some(format!("{}:{}", auth_name.to_ascii_uppercase(), auth_code))
+}
+
+fn load_feature_collection(
+    conn: &Connection,
+    path: &str,
+    extension: &str,
+    options: &NativeVectorOptions,
+) -> Result<String, String> {
+    let src = source_sql(path, extension, options.layer.as_deref());
+    let columns = describe_columns(conn, &src)?;
+    let detected = detect_geometry_column(&columns)
+        .ok_or_else(|| "DuckDB did not find a geometry column in this file.".to_string())?;
+
+    let source_crs = options
+        .override_source_crs
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| read_source_crs(conn, path, extension));
+
+    let geom_geojson = geometry_geojson_expr(&geometry_expr(&detected), source_crs.as_deref());
+    let patch = null_patch_json(&excluded_property_keys(&columns, &detected.column));
+    let sql = feature_collection_sql(&src, &geom_geojson, &patch);
+
+    conn.query_row(&sql, [], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Could not build GeoJSON: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +289,66 @@ mod tests {
         assert!(keys.contains(&"OGC_FID".to_string()));
         assert!(!keys.contains(&"id".to_string()));
         assert_eq!(null_patch_json(&["geom".into(), "raw".into()]), r#"{"geom":null,"raw":null}"#);
+    }
+
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+    }
+
+    #[test]
+    fn loads_parquet_into_feature_collection() {
+        let conn = open_in_memory().expect("conn");
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial");
+        let fc_json = load_feature_collection(
+            &conn,
+            &fixture("points_wgs84.parquet"),
+            "parquet",
+            &NativeVectorOptions::default(),
+        )
+        .expect("load");
+        let fc: serde_json::Value = serde_json::from_str(&fc_json).expect("json");
+        assert_eq!(fc["type"], "FeatureCollection");
+        assert_eq!(fc["features"].as_array().unwrap().len(), 2);
+        let f0 = &fc["features"][0];
+        assert_eq!(f0["geometry"]["type"], "Point");
+        assert_eq!(f0["geometry"]["coordinates"][0], -3.7);
+        // properties exclude geometry, blob, and OGC_FID
+        assert_eq!(f0["properties"]["id"], 1);
+        assert_eq!(f0["properties"]["name"], "alpha");
+        assert!(f0["properties"].get("geom").is_none());
+        assert!(f0["properties"].get("raw").is_none());
+        assert!(f0["properties"].get("ogc_fid").is_none());
+    }
+
+    #[test]
+    fn reprojects_when_source_crs_is_overridden() {
+        let conn = open_in_memory().expect("conn");
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial");
+        let options = NativeVectorOptions {
+            override_source_crs: Some("EPSG:3857".to_string()),
+            ..Default::default()
+        };
+        let fc_json = load_feature_collection(
+            &conn,
+            &fixture("points_3857.parquet"),
+            "parquet",
+            &options,
+        )
+        .expect("load");
+        let fc: serde_json::Value = serde_json::from_str(&fc_json).expect("json");
+        let lon = fc["features"][0]["geometry"]["coordinates"][0].as_f64().unwrap();
+        let lat = fc["features"][0]["geometry"]["coordinates"][1].as_f64().unwrap();
+        assert!((lon - (-3.6986)).abs() < 0.01, "lon was {lon}");
+        assert!((lat - 40.4173).abs() < 0.01, "lat was {lat}");
+    }
+
+    #[test]
+    fn errors_when_no_geometry_column() {
+        let conn = open_in_memory().expect("conn");
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial");
+        // a parquet with no geometry: reuse describe path via a values-based source
+        let result = describe_columns(&conn, "SELECT 1 AS id, 'x' AS name");
+        let cols = result.expect("describe");
+        assert!(detect_geometry_column(&cols).is_none());
     }
 }
