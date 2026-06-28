@@ -119,7 +119,7 @@ fn feature_collection_sql(source_sql: &str, geom_geojson_expr: &str, null_patch:
     )
 }
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -195,6 +195,60 @@ fn load_feature_collection(
 
     conn.query_row(&sql, [], |row| row.get::<_, String>(0))
         .map_err(|e| format!("Could not build GeoJSON: {e}"))
+}
+
+pub(crate) const DEFAULT_FEATURE_WARN_COUNT: u64 = 500_000;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeVectorResult {
+    pub needs_confirmation: bool,
+    pub feature_count: Option<u64>,
+    pub feature_collection: Option<String>,
+}
+
+fn count_features(conn: &Connection, source_sql: &str) -> Result<u64, String> {
+    conn.query_row(
+        &format!("SELECT count(*) FROM ({source_sql}) AS data"),
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n.max(0) as u64)
+    .map_err(|e| format!("Could not count features: {e}"))
+}
+
+pub(crate) fn run_native_load(
+    conn: &Connection,
+    path: &str,
+    extension: &str,
+    options: &NativeVectorOptions,
+) -> Result<NativeVectorResult, String> {
+    let src = source_sql(path, extension, options.layer.as_deref());
+    // Validate geometry early so a missing-geometry file errors before the count.
+    let columns = describe_columns(conn, &src)?;
+    if detect_geometry_column(&columns).is_none() {
+        return Err("DuckDB did not find a geometry column in this file.".to_string());
+    }
+
+    let warn_at = options.feature_warn_count.unwrap_or(DEFAULT_FEATURE_WARN_COUNT);
+    let confirmed = options.large_dataset_confirmed.unwrap_or(false);
+    if !confirmed {
+        let count = count_features(conn, &src)?;
+        if count > warn_at {
+            return Ok(NativeVectorResult {
+                needs_confirmation: true,
+                feature_count: Some(count),
+                feature_collection: None,
+            });
+        }
+    }
+
+    let fc = load_feature_collection(conn, path, extension, options)?;
+    Ok(NativeVectorResult {
+        needs_confirmation: false,
+        feature_count: None,
+        feature_collection: Some(fc),
+    })
 }
 
 #[cfg(test)]
@@ -350,5 +404,32 @@ mod tests {
         let result = describe_columns(&conn, "SELECT 1 AS id, 'x' AS name");
         let cols = result.expect("describe");
         assert!(detect_geometry_column(&cols).is_none());
+    }
+
+    #[test]
+    fn returns_needs_confirmation_when_over_threshold_and_unconfirmed() {
+        let conn = open_in_memory().expect("conn");
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial");
+        let options = NativeVectorOptions { feature_warn_count: Some(1), ..Default::default() };
+        let result = run_native_load(&conn, &fixture("points_wgs84.parquet"), "parquet", &options)
+            .expect("run");
+        assert!(result.needs_confirmation);
+        assert_eq!(result.feature_count, Some(2));
+        assert!(result.feature_collection.is_none());
+    }
+
+    #[test]
+    fn loads_when_confirmed_despite_threshold() {
+        let conn = open_in_memory().expect("conn");
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").expect("spatial");
+        let options = NativeVectorOptions {
+            feature_warn_count: Some(1),
+            large_dataset_confirmed: Some(true),
+            ..Default::default()
+        };
+        let result = run_native_load(&conn, &fixture("points_wgs84.parquet"), "parquet", &options)
+            .expect("run");
+        assert!(!result.needs_confirmation);
+        assert!(result.feature_collection.is_some());
     }
 }
