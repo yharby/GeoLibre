@@ -516,10 +516,21 @@ async function parseKmz(
   return mergeFeatureCollections(collections);
 }
 
+type DuckDbVectorLoader = (
+  file: DuckDbVectorFile,
+  options?: DuckDbVectorLoadOptions,
+) => Promise<FeatureCollection>;
+
 async function loadDuckDbVector(
   file: DuckDbVectorFile,
   options?: DuckDbVectorLoadOptions,
 ) {
+  // Test seam: tests set globalThis.__GEOLIBRE_DUCKDB_VECTOR__ to avoid the
+  // DuckDB-WASM bundle (which carries Vite ?url imports that fail in Node).
+  const override = (
+    globalThis as { __GEOLIBRE_DUCKDB_VECTOR__?: DuckDbVectorLoader }
+  ).__GEOLIBRE_DUCKDB_VECTOR__;
+  if (override) return override(file, options);
   const { loadDuckDbVectorFile } = await import("./duckdb-vector-loader");
   return loadDuckDbVectorFile(file, options);
 }
@@ -864,9 +875,26 @@ async function loadTauriVectorFile(
     }
   }
 
+  // Native duckdb-rs first on desktop; WASM is the fallback for anything native
+  // cannot handle. (Web build never reaches loadTauriVectorFile.)
+  const siblingFiles =
+    extension === "shp" ? await readShapefileSiblings(path) : [];
+
+  if (isTauri()) {
+    try {
+      const { loadNativeVectorFile } = await import("./native-duckdb-vector");
+      return { data: await loadNativeVectorFile(path, extension, options), path };
+    } catch (error) {
+      if (isVectorLoadCancelled(error)) throw error;
+      console.warn(
+        "[GeoLibre] native vector load failed; retrying with duckdb-wasm.",
+        error,
+      );
+      // fall through to WASM
+    }
+  }
+
   try {
-    const siblingFiles =
-      extension === "shp" ? await readShapefileSiblings(path) : [];
     return {
       data: await loadDuckDbVector(
         {
@@ -883,7 +911,7 @@ async function loadTauriVectorFile(
     if (isVectorLoadCancelled(error)) throw error;
     const detail = error instanceof Error ? error.message : "Unknown error";
     throw new Error(
-      `Could not convert this vector file with DuckDB-WASM. ${detail}`,
+      `Could not convert this vector file with DuckDB. ${detail}`,
     );
   }
 }
