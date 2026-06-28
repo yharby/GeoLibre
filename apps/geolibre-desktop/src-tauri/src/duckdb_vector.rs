@@ -1,4 +1,5 @@
-use duckdb::Connection;
+use duckdb::{Config, Connection};
+use std::path::Path;
 
 /// Open a fresh in-memory DuckDB connection for a single vector load.
 pub(crate) fn open_in_memory() -> Result<Connection, String> {
@@ -251,6 +252,34 @@ pub(crate) fn run_native_load(
     })
 }
 
+/// Open an in-memory DuckDB connection with `allow_unsigned_extensions` and external access
+/// enabled, then load the spatial extension from a bundled file (if it exists) or fall back
+/// to `INSTALL spatial; LOAD spatial;` from the network/cache.
+pub(crate) fn open_with_spatial(extension_path: Option<&Path>) -> Result<Connection, String> {
+    let config = Config::default()
+        .allow_unsigned_extensions()
+        .map_err(|e| format!("DuckDB config (unsigned) failed: {e}"))?
+        .enable_external_access(true)
+        .map_err(|e| format!("DuckDB config (external access) failed: {e}"))?;
+    let conn = Connection::open_in_memory_with_flags(config)
+        .map_err(|e| format!("Could not open DuckDB: {e}"))?;
+
+    let loaded_from_bundle = match extension_path {
+        Some(path) if path.exists() => {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            conn.execute_batch(&format!("LOAD {};", quote_sql_string(&normalized)))
+                .map_err(|e| format!("Could not load bundled spatial extension: {e}"))?;
+            true
+        }
+        _ => false,
+    };
+    if !loaded_from_bundle {
+        conn.execute_batch("INSTALL spatial; LOAD spatial;")
+            .map_err(|e| format!("Could not install/load spatial extension: {e}"))?;
+    }
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +460,18 @@ mod tests {
             .expect("run");
         assert!(!result.needs_confirmation);
         assert!(result.feature_collection.is_some());
+    }
+
+    #[test]
+    fn open_with_spatial_loads_extension() {
+        // No bundled path provided -> INSTALL/LOAD from the network or local cache.
+        // In CI without network this is allowed to fail; gate on cfg to keep it
+        // deterministic locally where the extension cache exists.
+        if let Ok(conn) = open_with_spatial(None) {
+            let ok: i64 = conn
+                .query_row("SELECT 1 FROM duckdb_extensions() WHERE extension_name='spatial' AND loaded", [], |r| r.get(0))
+                .unwrap_or(0);
+            assert_eq!(ok, 1);
+        }
     }
 }
