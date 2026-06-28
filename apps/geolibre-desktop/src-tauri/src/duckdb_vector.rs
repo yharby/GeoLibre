@@ -2,7 +2,9 @@ use duckdb::{Config, Connection};
 use std::path::Path;
 use tauri::{AppHandle, Manager};
 
-/// Open a fresh in-memory DuckDB connection for a single vector load.
+/// Open a fresh in-memory DuckDB connection. Test-only helper: production opens
+/// connections through `open_with_spatial` (which uses flags for the extension).
+#[cfg(test)]
 pub(crate) fn open_in_memory() -> Result<Connection, String> {
     Connection::open_in_memory().map_err(|error| format!("Could not open DuckDB: {error}"))
 }
