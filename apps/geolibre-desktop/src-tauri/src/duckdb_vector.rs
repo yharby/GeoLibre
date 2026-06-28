@@ -1,5 +1,6 @@
 use duckdb::{Config, Connection};
 use std::path::Path;
+use tauri::{AppHandle, Manager};
 
 /// Open a fresh in-memory DuckDB connection for a single vector load.
 pub(crate) fn open_in_memory() -> Result<Connection, String> {
@@ -278,6 +279,33 @@ pub(crate) fn open_with_spatial(extension_path: Option<&Path>) -> Result<Connect
             .map_err(|e| format!("Could not install/load spatial extension: {e}"))?;
     }
     Ok(conn)
+}
+
+/// Per-platform resource subpath populated by scripts/fetch-duckdb-spatial.mjs.
+fn platform_extension_subpath() -> Option<&'static str> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    { Some("resources/duckdb/osx_arm64/spatial.duckdb_extension") }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    { Some("resources/duckdb/osx_amd64/spatial.duckdb_extension") }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    { Some("resources/duckdb/windows_amd64/spatial.duckdb_extension") }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    { Some("resources/duckdb/linux_amd64/spatial.duckdb_extension") }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    { Some("resources/duckdb/linux_arm64/spatial.duckdb_extension") }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    { None }
+}
+
+pub(crate) fn resolve_spatial_extension_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let sub = platform_extension_subpath()?;
+    app.path().resolve(sub, tauri::path::BaseDirectory::Resource).ok()
 }
 
 #[cfg(test)]

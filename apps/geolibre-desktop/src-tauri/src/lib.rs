@@ -181,6 +181,7 @@ pub fn run() {
             fetch_url_bytes,
             install_external_plugin_archive,
             load_external_plugin_bundles,
+            load_native_vector,
             read_admin_profile,
             read_local_file,
             read_project_file,
@@ -313,6 +314,34 @@ fn read_local_file(path: String) -> Result<tauri::ipc::Response, String> {
     fs::read(&path)
         .map(tauri::ipc::Response::new)
         .map_err(|error| format!("Could not read local file: {error}"))
+}
+
+/// Load a local vector file natively via DuckDB-rs + the spatial extension.
+///
+/// The path is validated by `is_allowed_local_vector_path` (absolute, no `..`
+/// traversal, known vector extension) before any DuckDB work begins. The
+/// spatial extension is loaded from the platform-specific bundled file when it
+/// exists; it falls back to `INSTALL spatial; LOAD spatial;` from the
+/// network/cache when the bundle is absent (e.g. a dev build).
+#[tauri::command]
+async fn load_native_vector(
+    app: tauri::AppHandle,
+    path: String,
+    extension: String,
+    options: duckdb_vector::NativeVectorOptions,
+) -> Result<duckdb_vector::NativeVectorResult, String> {
+    if !is_allowed_local_vector_path(&path) {
+        return Err(format!(
+            "Refusing to read \"{path}\": not an absolute local vector file path"
+        ));
+    }
+    let ext_path = duckdb_vector::resolve_spatial_extension_path(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = duckdb_vector::open_with_spatial(ext_path.as_deref())?;
+        duckdb_vector::run_native_load(&conn, &path, &extension.to_lowercase(), &options)
+    })
+    .await
+    .map_err(|e| format!("Native vector task failed: {e}"))?
 }
 
 /// Shapefile sidecar extensions read alongside a `.shp` (lowercased, no dot).
